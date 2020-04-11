@@ -93,11 +93,12 @@ def connection_handling(client_socket, base_folder):
             response_status = 500
             response_mnem = e
 
-    # logging.info(f'{http} {response_status} {response_mnem}\r\n'.encode())
-    client_socket.send(f'{http} {response_status} {response_mnem}\r\n'.encode())
-    client_socket.send('\r\n'.join([f'{k}: {v}' for k, v in response_headers.items()]).encode())
-    client_socket.send(b'\r\n\r\n')
-    client_socket.send(response_body)
+    response = f'{http} {response_status} {response_mnem}\r\n'
+    response += '\r\n'.join([f'{k}: {v}' for k, v in response_headers.items()])
+    response += '\r\n\r\n'
+    response_encoded = response.encode()
+    response_encoded += response_body
+    client_socket.send(response_encoded)
     client_socket.close()
 
 
@@ -109,11 +110,10 @@ if __name__ == "__main__":
     (opts, args) = op.parse_args()
     logging.basicConfig(filename=None, level=logging.INFO,
                         format='[%(asctime)s] %(levelname).1s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
-    # Start server
+
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     server.bind(('', opts.port))
-    # logging.info(f'Start server on port {opts.port}')
     server.listen(50000)
     with concurrent.futures.ThreadPoolExecutor(max_workers=int(opts.workers)) as executor:
         while True:
