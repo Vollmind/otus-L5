@@ -1,11 +1,10 @@
+import concurrent.futures
 import logging
 import os
 import socket
-import threading
 from datetime import datetime
 from optparse import OptionParser
 from urllib.parse import unquote
-import concurrent.futures
 
 INDEX_PAGE = 'index.html'
 MIME_TYPES = {
