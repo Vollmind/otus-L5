@@ -1,5 +1,6 @@
 import concurrent.futures
 import logging
+import mimetypes
 import os
 import socket
 from datetime import datetime
@@ -7,18 +8,6 @@ from optparse import OptionParser
 from urllib.parse import unquote
 
 INDEX_PAGE = 'index.html'
-MIME_TYPES = {
-    'html': 'text/html',
-    'css': 'text/css',
-    'js': 'application/javascript',
-    'jpg': 'image/jpeg',
-    'jpeg': 'image/jpeg',
-    'png': 'image/png',
-    'gif': 'image/gif',
-    'swf': 'application/x-shockwave-flash',
-    'webp': 'image/webp',
-    'txt': 'text/plain',
-}
 
 
 def fill_file_info(path, need_body):
@@ -26,8 +15,10 @@ def fill_file_info(path, need_body):
     response_headers = {
         'Date': datetime.fromtimestamp(file_stat.st_mtime).strftime('%d.%m.%Y'),
         'Content-Length':  file_stat.st_size,
-        'Content-Type': MIME_TYPES[path.split('.')[-1].lower()],
+        'Content-Type': mimetypes.guess_type(path)[0],
     }
+    if response_headers['Content-Type'] is None:
+        response_headers['Content-Type'] = 'application/octet-stream'
     response_body = b''
     if need_body:
         with open(path, 'rb') as file:
@@ -35,69 +26,90 @@ def fill_file_info(path, need_body):
     return response_headers, response_body
 
 
-def check_folder_level(address):
-    folder_counter = 0
-    for i in address.split('/'):
-        if i == '..':
-            folder_counter -= 1
-        else:
-            folder_counter += 1
-        if folder_counter < 0:
-            raise PermissionError
+def check_access(address):
+    if address.startswith('..'):
+        raise PermissionError
 
 
-def connection_handling(client_socket, base_folder):
-    data = b""
+def read_http_request(client_socket):
+    data = b''
     partlen = 1024
     while True:
         part = client_socket.recv(partlen)
         data += part
-        if len(part) < partlen:
+        if b'\r\n\r\n' in data:
+            split = data.split(b'\r\n\r\n')
+            body = split[1]
+            request_splitted = split[0].decode().splitlines()
+            request = request_splitted[0]
+            request_headers = {y[0]: y[1] for y in [x.split(': ') for x in request_splitted[1:]]}
             break
-    request = data.decode('UTF8').splitlines()
-    method, address, http = request[0].split(' ')
-    response_headers = {
+        if not part:
+            raise RuntimeError
+    if 'Content-Length' in request_headers.keys():
+        while len(body) < int(request_headers['Content-Length']):
+            part = client_socket.recv(partlen)
+            body += part
+    return request, request_headers, body.decode()
+
+
+def prepare_address(address, base_folder):
+    address = unquote(address)
+    if '?' in address:
+        address = address[:address.index('?')]
+    if address[-1] == '/':
+        address = address + INDEX_PAGE
+    if base_folder:
+        address = f'/{base_folder}{address}'
+    address = f'.{address}'
+    address = os.path.normpath(address)
+    return address
+
+
+def create_http_response(http, code, mnemonic, headers={}, body=b''):
+    # Add base headers
+    headers.update({
         'Connection': 'keep-alive',
         'Server': 'Python socket'
-    }
-    response_status = 200
-    response_mnem = 'OK'
-    response_body = b''
-    if method not in ['GET', 'HEAD']:
-        response_status = 405
-        response_mnem = 'METHOD NOT ALLOWED'
-        response_headers['Allow'] = 'GET, HEAD'
-    else:
-        address = unquote(address)
-        if '?' in address:
-            address = address[:address.index('?')]
-        if address[-1] == '/':
-            address = address + INDEX_PAGE
-        if base_folder:
-            address = f'/{base_folder}{address}'
-        address = f'.{address}'
-
-        try:
-            check_folder_level(address)
-            file_head, file_body = fill_file_info(address, method != 'HEAD')
-            response_headers.update(file_head)
-            response_body = file_body
-        except (FileNotFoundError, NotADirectoryError):
-            response_status = 404
-            response_mnem = 'NOT FOUND'
-        except PermissionError:
-            response_status = 403
-            response_mnem = 'FORBIDDEN'
-        except Exception as e:
-            response_status = 500
-            response_mnem = e
-
-    response = f'{http} {response_status} {response_mnem}\r\n'
-    response += '\r\n'.join([f'{k}: {v}' for k, v in response_headers.items()])
+    })
+    response = f'{http} {code} {mnemonic}\r\n'
+    response += '\r\n'.join([f'{k}: {v}' for k, v in headers.items()])
     response += '\r\n\r\n'
-    response_encoded = response.encode()
-    response_encoded += response_body
-    client_socket.send(response_encoded)
+    return response.encode() + body
+
+
+def connection_handling(client_socket, base_folder):
+    http = 'HTTP/1.1'
+    try:
+        request, _, _ = read_http_request(client_socket)
+        method, address, http = request.split(' ')
+        if method not in ['GET', 'HEAD']:
+            response = create_http_response(
+                http,
+                405,
+                'METHOD NOT ALLOWED',
+                {'Allow': 'GET, HEAD'}
+            )
+        else:
+            address = prepare_address(address, base_folder)
+            check_access(address)
+            file_head, file_body = fill_file_info(address, method != 'HEAD')
+            response = create_http_response(
+                http,
+                200,
+                'OK',
+                file_head,
+                file_body
+            )
+    except (FileNotFoundError, NotADirectoryError):
+        response = create_http_response(http, 404, 'NOT FOUND')
+    except PermissionError:
+        response = create_http_response(http, 403, 'FORBIDDEN')
+    except RuntimeError:
+        response = create_http_response(http, 400, 'BAD REQUEST')
+    except Exception as e:
+        response = create_http_response(http, 500, e)
+    client_socket.send(response)
     client_socket.close()
 
 
